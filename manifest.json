@@ -5,6 +5,10 @@
   "description": "Resumen de productos de falabella",
   "permissions": ["scripting", "activeTab", "storage", "tabs"],
   "host_permissions": ["http://localhost:3000/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
   "action": {
     "default_popup": "src/popup/popup.html"
   },
@@ -14,7 +18,7 @@
       "js": ["content/falabella.js"]
     },
     {
-      "matches": ["https://www.mercadolibre.com.pe/*"],
+      "matches": ["https://*.mercadolibre.com.pe/*"],
       "js": ["content/mercadoLibre.js"]
     }
   ]

@@ -1,17 +1,56 @@
-// Content script for Falabella: scrape product items and respond to messages from the extension
+// Content script: Falabella (MV3) - incremental scrape with cancel + progress
 export {};
 
-console.log('Falabella content script injected')
-let cancelled = false;
+console.log("Falabella content script injected");
+
+type PortMsg =
+  | { type: "start"; site: "falabella"; keywordId: string; keyword: string }
+  | { type: "cancel" };
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function scrapeFalabellaOnce() {
+  const nodeList = document.querySelectorAll('[data-testid="ssr-pod"]');
+  const datos = Array.from(nodeList);
+
+  const productos = datos.map((producto: Element, idx) => {
+    const text = (producto as HTMLElement).innerText || "";
+    const [marca, nombreArticulo, quienComercializa, precioArticulo, descuento] = text.split("\n");
+
+    return {
+      marca: marca ?? null,
+      nombreArticulo: nombreArticulo ?? null,
+      quienComercializa: quienComercializa ?? null,
+      precioArticulo: precioArticulo ?? null,
+      descuento: descuento ?? null,
+      position: idx + 1,
+      
+      url: null,
+    };
+  });
+
+  return productos;
+}
+
+async function scrollStep() {
+ 
+  window.scrollBy(0, Math.floor(window.innerHeight * 0.85));
+  await sleep(250);
+}
 
 chrome.runtime.onConnect.addListener((port) => {
   if (!port.name.startsWith("scrape:")) return;
 
-  port.onMessage.addListener((msg) => {
-    // Manejo de la señal de cancelación inmediata
+  let cancelled = false;
+
+  
+  port.postMessage({ type: "ready" });
+
+  port.onMessage.addListener(async (msg: PortMsg) => {
     if (msg?.type === "cancel") {
       cancelled = true;
-      port.postMessage({ type: "cancelled" });
       return;
     }
 
@@ -19,70 +58,52 @@ chrome.runtime.onConnect.addListener((port) => {
       cancelled = false;
 
       try {
-        const nodeList = document.querySelectorAll('[data-testid=ssr-pod]');
-        const datos = Array.from(nodeList);
+        const TARGET = 60;            // Falabella requiere 60 si existen
+        const MAX_ITER = 30;          // límite de seguridad
+        const STALL_LIMIT = 6;        
+        const TICK_MS = 250;          // cancelación rápida
 
-        const productos = datos.map((producto: Element, idx) => {
-          const text = (producto as HTMLElement).innerText || "";
-          const [marca, nombreArticulo, quienComercializa, precioArticulo, descuento] = text.split("\n");
-          return { 
-            marca, 
-            nombreArticulo, 
-            quienComercializa, 
-            precioArticulo, 
-            descuento, 
-            position: idx + 1 
-          };
-        });
+        let lastCount = 0;
+        let stall = 0;
 
-        // 1. Notificamos el progreso (cantidad encontrada)
-        port.postMessage({ type: "progress", count: productos.length });
+        for (let iter = 0; iter < MAX_ITER; iter++) {
+          if (cancelled) {
+            port.postMessage({ type: "cancelled" });
+            return;
+          }
 
-        // 2. Verificamos si se ha solicitado cancelación
+          const productos = scrapeFalabellaOnce();
+
+          // progress cuando crece
+          if (productos.length > lastCount) {
+            lastCount = productos.length;
+            port.postMessage({ type: "progress", count: lastCount });
+            stall = 0;
+          } else {
+            stall++;
+          }
+
+          // condiciones de salida
+          if (lastCount >= TARGET) break;
+          if (stall >= STALL_LIMIT) break;
+
+          // scroll para intentar cargar más
+          await scrollStep();
+
+          await sleep(TICK_MS);
+        }
+
         if (cancelled) {
           port.postMessage({ type: "cancelled" });
           return;
         }
 
-        // 3. Enviar resultados completos por el puerto
-        port.postMessage({ type: "result", products: productos });
-
+        // resultado final
+        const finalProducts = scrapeFalabellaOnce();
+        port.postMessage({ type: "result", products: finalProducts });
       } catch (err: any) {
-        // Enviar error por el puerto
         port.postMessage({ type: "error", message: String(err?.message || err) });
       }
     }
   });
 });
-
-
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === 'scrape') {
-    try {
-      const nodeList = document.querySelectorAll('[data-testid=ssr-pod]')
-      const datos = Array.from(nodeList)
-      const productos = datos.map((producto: Element) => {
-        const text = (producto as HTMLElement).innerText || ''
-        const [marca, nombreArticulo, quienComercializa, precioArticulo, descuento] = text.split('\n')
-        return { marca, nombreArticulo, quienComercializa, precioArticulo, descuento }
-      })
-
-      // Reply to the popup (synchronous response)
-      sendResponse({ result: productos })
-
-      // Also forward the scraped data to the background service worker for forwarding to external API
-      try {
-        chrome.runtime.sendMessage({ type: 'scrapedData', data: productos }, (resp) => {
-          // optional ack handling
-          // console.log('Background ack:', resp)
-        })
-      } catch (err) {
-        console.warn('Could not send scraped data to background', err)
-      }
-    } catch (err) {
-      console.error('Falabella scrape error', err)
-      sendResponse({ error: String(err) })
-    }
-    return true
-  }
-})
