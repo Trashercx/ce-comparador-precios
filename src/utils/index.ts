@@ -58,4 +58,6 @@ export async function showResults(resultEl: HTMLElement | null, products: any[])
     })
   }
 }
+export * from "./types";
+export * from "./storage";
 
