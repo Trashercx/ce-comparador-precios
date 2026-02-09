@@ -2,7 +2,6 @@ import { loadAppState, saveKeywords, upsertJob, upsertResults, newJob } from "..
 import type { KeywordItem, ProductNormalized, Site, ScrapeJob } from "../utils/types";
 
 type ActiveKey = `${string}:${Site}`; // keywordId:site
-
 const activePorts = new Map<ActiveKey, chrome.runtime.Port>();
 
 function keyOf(keywordId: string, site: Site): ActiveKey {
@@ -15,14 +14,34 @@ function buildSearchUrl(site: Site, keyword: string): string {
   return `https://listado.mercadolibre.com.pe/${q}`;
 }
 
+function waitTabComplete(tabId: number, timeoutMs = 20000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Timeout esperando que el tab cargue"));
+    }, timeoutMs);
+
+    const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
+      if (updatedTabId === tabId && info.status === "complete") {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
 function parsePriceNumber(input: unknown): number | null {
   if (typeof input !== "string") return null;
-  // soporta "S/ 1,299", "1.299", "1299", etc.
+
   const cleaned = input
     .replace(/[^\d.,]/g, "")
-    .replace(/\.(?=\d{3}(\D|$))/g, "") // separador de miles con punto
-    .replace(/,(?=\d{3}(\D|$))/g, ""); // separador de miles con coma
-  const normalized = cleaned.replace(",", "."); // decimal con coma
+    .replace(/\.(?=\d{3}(\D|$))/g, "") // miles con punto
+    .replace(/,(?=\d{3}(\D|$))/g, ""); // miles con coma
+
+  const normalized = cleaned.replace(",", ".");
   const n = Number(normalized);
   return Number.isFinite(n) ? n : null;
 }
@@ -45,7 +64,6 @@ function toNormalizedProducts(site: Site, keyword: string, items: any[]): Produc
     }));
   }
 
-  // MercadoLibre
   return items.map((p, idx) => {
     const parts: string[] = Array.isArray(p.raw) ? p.raw : [];
     const title = parts[0] ?? null;
@@ -81,11 +99,17 @@ async function getOrCreateKeywordId(keyword: string): Promise<{ keywordId: strin
 }
 
 function notifyPopup(msg: any) {
-  // Si el popup no está abierto, no pasa nada xd.
   try {
     chrome.runtime.sendMessage(msg);
   } catch {
     // ignore
+  }
+}
+
+function cleanup(activeKey: ActiveKey, port?: chrome.runtime.Port) {
+  const current = activePorts.get(activeKey);
+  if (port && current === port) {
+    activePorts.delete(activeKey);
   }
 }
 
@@ -103,20 +127,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const { keywordId } = await getOrCreateKeywordId(keyword);
         const url = buildSearchUrl(site, keyword);
 
+        // 1) Abrir tab
         const tab = await chrome.tabs.create({ url, active: true });
         if (!tab.id) throw new Error("No se pudo obtener tab.id");
         const tabId = tab.id;
 
-        // Guardar job RUNNING en storage
+        // 2) Esperar a que cargue (clave para que el content script esté listo)
+        await waitTabComplete(tabId);
+
+        // 3) Guardar job RUNNING
         const job: ScrapeJob = newJob(tabId, url);
         await upsertJob(keywordId, site, job);
-
         notifyPopup({ type: "jobUpdate", keywordId, site, job });
 
-        // Conectar por puerto persistente 
+        // 4) Conectar por puerto persistente (requisito)
         const port = chrome.tabs.connect(tabId, { name: `scrape:${site}` });
         const activeKey = keyOf(keywordId, site);
 
+        // Cerrar port anterior si existía
         const old = activePorts.get(activeKey);
         if (old) {
           try { old.disconnect(); } catch {}
@@ -126,12 +154,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         activePorts.set(activeKey, port);
 
         port.onDisconnect.addListener(() => {
-          // Limpieza si se cierra el tab o se desconecta
-          if (activePorts.get(activeKey) === port) activePorts.delete(activeKey);
+          cleanup(activeKey, port);
         });
 
         port.onMessage.addListener(async (msg) => {
-          // msg esperado: progress | result | error | cancelled
+        
+          // console.log("BG port msg:", msg);
+
+          if (msg?.type === "ready") {
+            // handshake opcional (content dice "estoy listo")
+            return;
+          }
+
           if (msg?.type === "progress") {
             const count = Number(msg.count || 0);
             const nextJob: ScrapeJob = { ...job, count };
@@ -158,9 +192,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             notifyPopup({ type: "jobUpdate", keywordId, site, job: doneJob });
             notifyPopup({ type: "jobResult", keywordId, site, products: normalizedProducts });
 
-            // desconectar y limpiar
             try { port.disconnect(); } catch {}
-            activePorts.delete(activeKey);
+            cleanup(activeKey, port);
             return;
           }
 
@@ -177,7 +210,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             notifyPopup({ type: "jobUpdate", keywordId, site, job: errorJob });
 
             try { port.disconnect(); } catch {}
-            activePorts.delete(activeKey);
+            cleanup(activeKey, port);
             return;
           }
 
@@ -188,16 +221,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               endedAt: Date.now(),
               error: null,
             };
+
             await upsertJob(keywordId, site, cancelledJob);
             notifyPopup({ type: "jobUpdate", keywordId, site, job: cancelledJob });
 
             try { port.disconnect(); } catch {}
-            activePorts.delete(activeKey);
+            cleanup(activeKey, port);
             return;
           }
         });
 
-        // Iniciar scraping en content
+        // 5) Iniciar scraping en content
         port.postMessage({ type: "start", site, keywordId, keyword });
 
         sendResponse({ ok: true, keywordId, tabId, url });

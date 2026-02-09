@@ -3,7 +3,7 @@
   "name": "Scraping de falabella",
   "version": "1.0",
   "description": "Resumen de productos de falabella",
-  "permissions": ["scripting", "activeTab"],
+  "permissions": ["scripting", "activeTab", "storage", "tabs"],
   "host_permissions": ["http://localhost:3000/*"],
   "action": {
     "default_popup": "src/popup/popup.html"
