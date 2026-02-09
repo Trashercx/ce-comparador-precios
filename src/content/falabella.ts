@@ -8,6 +8,7 @@ chrome.runtime.onConnect.addListener((port) => {
   if (!port.name.startsWith("scrape:")) return;
 
   port.onMessage.addListener((msg) => {
+    // Manejo de la señal de cancelación inmediata
     if (msg?.type === "cancel") {
       cancelled = true;
       port.postMessage({ type: "cancelled" });
@@ -24,17 +25,36 @@ chrome.runtime.onConnect.addListener((port) => {
         const productos = datos.map((producto: Element, idx) => {
           const text = (producto as HTMLElement).innerText || "";
           const [marca, nombreArticulo, quienComercializa, precioArticulo, descuento] = text.split("\n");
-          return { marca, nombreArticulo, quienComercializa, precioArticulo, descuento, position: idx + 1 };
+          return { 
+            marca, 
+            nombreArticulo, 
+            quienComercializa, 
+            precioArticulo, 
+            descuento, 
+            position: idx + 1 
+          };
         });
 
-        // Enviar “result” por el puerto (NO sendResponse)
+        // 1. Notificamos el progreso (cantidad encontrada)
+        port.postMessage({ type: "progress", count: productos.length });
+
+        // 2. Verificamos si se ha solicitado cancelación
+        if (cancelled) {
+          port.postMessage({ type: "cancelled" });
+          return;
+        }
+
+        // 3. Enviar resultados completos por el puerto
         port.postMessage({ type: "result", products: productos });
+
       } catch (err: any) {
+        // Enviar error por el puerto
         port.postMessage({ type: "error", message: String(err?.message || err) });
       }
     }
   });
 });
+
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'scrape') {

@@ -8,11 +8,13 @@ chrome.runtime.onConnect.addListener((port) => {
   if (!port.name.startsWith("scrape:")) return;
 
   port.onMessage.addListener((msg) => {
+    
     if (msg?.type === "cancel") {
       cancelled = true;
       port.postMessage({ type: "cancelled" });
       return;
     }
+
 
     if (msg?.type === "start") {
       cancelled = false;
@@ -27,7 +29,20 @@ chrome.runtime.onConnect.addListener((port) => {
           return { raw: parts, position: idx + 1 };
         });
 
+        
+       
+        port.postMessage({ type: "progress", count: productos.length });
+
+       
+        if (cancelled) {
+          port.postMessage({ type: "cancelled" });
+          return;
+        }
+
+     
         port.postMessage({ type: "result", products: productos });
+
+
       } catch (err: any) {
         port.postMessage({ type: "error", message: String(err?.message || err) });
       }
@@ -35,6 +50,7 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
+// Listener 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'scrape') {
     try {

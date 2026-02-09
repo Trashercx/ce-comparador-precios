@@ -56,3 +56,23 @@ function init() {
 }
 
 init();
+
+chrome.runtime.onMessage.addListener((msg) => {
+  const resultEl = document.getElementById("result");
+  if (!resultEl) return;
+
+  if (msg?.type === "jobUpdate") {
+    resultEl.innerHTML = `<div class="p-3 text-sm text-gray-700">
+      Estado: <b>${msg.job?.state}</b><br/>
+      Conteo: ${msg.job?.count ?? 0}<br/>
+      ${msg.job?.error ? `<span class="text-red-600">${msg.job.error}</span>` : ""}
+    </div>`;
+  }
+
+  if (msg?.type === "jobResult") {
+    // de momento es un json feo, luego lo mejoro :D
+    resultEl.innerHTML =
+      `<div class="p-3 text-sm text-gray-700">DONE ✓ (${msg.products?.length ?? 0} productos)</div>` +
+      `<pre class="p-3 text-xs bg-gray-50 overflow-auto max-h-64">${JSON.stringify(msg.products, null, 2)}</pre>`;
+  }
+});
